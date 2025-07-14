@@ -1,111 +1,68 @@
 import os
 import requests
 from openai import OpenAI
-from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 # 環境変数の読み込み
 load_dotenv()
 
-def fetch_recent_news():
-    """NewsAPIから24時間以内の関連ニュースを取得"""
-    url = "https://newsapi.org/v2/everything"
-    
-    # キーワード設定（OR条件で複数指定、AND条件も可能）
-    keywords = "(AI OR 人工知能 OR 機械学習 OR deep learning) AND (開発 OR 技術 OR 研究)"
-    
-    # 24時間前の日時を計算
-    date_24h_ago = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d")
-    
-    params = {
-        "q": keywords,
-        "from": date_24h_ago,
-        "sortBy": "relevancy",  # 関連度順でソート
-        "language": "ja",       # 日本語記事に限定（必要に応じて調整）
-        "apiKey": os.getenv("NEWS_API_KEY"),
-        "pageSize": 5,          # 上位5記事
-        "excludeDomains": "example.com,spam.site"  # 除外したいドメイン
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json().get("articles", [])
-    except requests.exceptions.RequestException as e:
-        print(f"NewsAPIリクエストエラー: {e}")
-        return []
+# 検索キーワード (英語)
+SEARCH_QUERY = "(insect OR animal OR behavior OR ecology) AND (paper OR discovery OR research)"
 
-def summarize_with_gpt(text):
-    """OpenAIで要約を生成（コスト最適化版）"""
+def fetch_english_news():
+    """英語のニュースを取得"""
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": SEARCH_QUERY,
+        "from": (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d"),
+        "sortBy": "publishedAt",
+        "language": "en",  # 英語記事のみ
+        "apiKey": os.getenv("NEWS_API_KEY"),
+        "pageSize": 5  # 最大5記事
+    }
+    response = requests.get(url, params=params)
+    return response.json().get("articles", [])
+
+def translate_and_summarize(text):
+    """英語を日本語に翻訳・要約"""
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     
-    try:
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo-0125",  # 最新の効率的なモデル
-            messages=[{
-                "role": "user",
-                "content": f"以下のニュースを日本語で簡潔に要約し、技術的な重要性を1文で説明してください（150字以内）:\n\n{text}"
-            }],
-            temperature=0.3,  # 創造性を低くし事実ベースに
-            max_tokens=150    # 出力トークン制限
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"OpenAI処理エラー: {e}")
-        return "要約の生成に失敗しました"
+    # 翻訳と要約を同時にリクエスト
+    prompt = f"""以下の英語テキストを日本語に翻訳し、簡潔に要約してください:
+
+{text}
+
+翻訳と要約:
+"""
+    response = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3  # 創造性を抑える
+    )
+    return response.choices[0].message.content
 
 def send_to_slack(message):
-    """Slackに通知（リッチフォーマット版）"""
-    payload = {
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": message
-                }
-            }
-        ]
-    }
-    
-    try:
-        response = requests.post(
-            os.getenv("SLACK_WEBHOOK_URL"),
-            json=payload,
-            timeout=5
-        )
-        if response.status_code != 200:
-            print(f"Slack送信エラー: {response.text}")
-    except Exception as e:
-        print(f"Slack接続エラー: {e}")
+    """Slackに通知"""
+    payload = {"text": message}
+    requests.post(os.getenv("SLACK_WEBHOOK_URL"), json=payload)
 
 def main():
-    print("=== ニュース収集開始 ===")
-    
-    articles = fetch_recent_news()
-    if not articles:
-        send_to_slack(":warning: 本日の関連ニュースは見つかりませんでした")
-        return
-
+    articles = fetch_english_news()
     for article in articles:
-        # 記事内容の前処理（長すぎる場合は切り詰め）
-        content = f"{article['title']}\n\n{article.get('description', '')}"
-        content = content[:2000]  # トークン節約のため制限
+        # タイトルと本文を結合して処理
+        content = f"Title: {article['title']}\n\nContent: {article['description'] or 'No description available'}"
+        japanese_summary = translate_and_summarize(content)
         
-        summary = summarize_with_gpt(content)
-        
-        # Slackメッセージの整形
+        # 通知メッセージ作成
         message = (
-            f":newspaper: *【{article['source']['name']}】{article['title']}*\n"
-            f"*要約*: {summary}\n"
-            f"*公開日時*: {article['publishedAt']}\n"
-            f"<{article['url']}|記事を読む>"
+            f"*【英語記事の日本語要約】*\n"
+            f"{japanese_summary}\n\n"
+            f"*元記事リンク*: {article['url']}\n"
+            f"*公開日時*: {article['publishedAt']}"
         )
-        
         send_to_slack(message)
-        print(f"処理済み: {article['title']}")
-    
-    print("=== 処理完了 ===")
 
 if __name__ == "__main__":
     main()
+    
