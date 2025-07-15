@@ -87,7 +87,7 @@ def fetch_ranked_news():
 def translate_and_summarize(ai_config: dict, text: str, target_lang: str = "ja") -> str:
     """翻訳&要約（モデル選択対応版）"""
     prompt = f"""
-    以下のテキストを{target_lang}に翻訳し、専門家向けに簡潔に要約してください。
+    以下のテキストを専門家向けに簡潔に要約し、{target_lang}に翻訳してください。
 
     原文:
     {text}
