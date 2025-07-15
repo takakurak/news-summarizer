@@ -1,68 +1,148 @@
 import os
 import requests
 from openai import OpenAI
+import google.generativeai as genai
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-# 環境変数の読み込み
+# 環境変数読み込み
 load_dotenv()
 
-# 検索キーワード (英語)
-SEARCH_QUERY = "(insect OR animal OR behavior OR ecology) AND (paper OR discovery OR research)"
+def get_model_name(provider: str) -> str:
+    """Secretで指定されたモデル名を取得（デフォルト値付き）"""
+    return {
+        "openai": os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+        "gemini": os.getenv("GEMINI_MODEL", "gemini-1.0-pro"),
+    }.get(provider.lower())
 
-def fetch_english_news():
-    """英語のニュースを取得"""
-    url = "https://newsapi.org/v2/everything"
+def init_ai_client():
+    """AIクライアント初期化（モデル選択対応版）"""
+    if os.getenv("DEEPSEEK_API_KEY"):
+        return {
+            "client": OpenAI(
+                api_key=os.getenv("DEEPSEEK_API_KEY"),
+                base_url="https://api.deepseek.com/v1"
+            ),
+            "model": "deepseek-chat"
+        }
+    elif os.getenv("OPENAI_API_KEY"):
+        return {
+            "client": OpenAI(api_key=os.getenv("OPENAI_API_KEY")),
+            "model": get_model_name("openai")
+        }
+    elif os.getenv("GEMINI_API_KEY"):
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        return {
+            "client": genai,
+            "model": get_model_name("gemini")
+        }
+    raise RuntimeError("有効なAI APIキーが設定されていません")
+
+def fetch_news():
+    """NewsAPIから24時間以内の記事を取得"""
     params = {
-        "q": SEARCH_QUERY,
+        "q": os.getenv("SEARCH_KEYWORDS", "(AI OR Machine Learning) AND (research OR study)"),
         "from": (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d"),
         "sortBy": "publishedAt",
         "language": "en",  # 英語記事のみ
         "apiKey": os.getenv("NEWS_API_KEY"),
         "pageSize": 5  # 最大5記事
     }
-    response = requests.get(url, params=params)
-    return response.json().get("articles", [])
+    try:
+        response = requests.get("https://newsapi.org/v2/everything", params=params)
+        response.raise_for_status()
+        return response.json().get("articles", [])
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"NewsAPIエラー: {str(e)}")
 
-def translate_and_summarize(text):
-    """英語を日本語に翻訳・要約"""
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    
-    # 翻訳と要約を同時にリクエスト
-    prompt = f"""以下の英語テキストを日本語に翻訳し、簡潔に要約してください:
+def fetch_ranked_news():
+    """relevancy_scoreでランキングした記事を取得"""
+    params = {
+        "q": os.getenv("SEARCH_KEYWORDS", "(insect OR animal) AND (research OR study)"),
+        "from": (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d"),
+        "language": "en",
+        "sortBy": "relevancy",  # 関連度順でソート
+        "pageSize": int(os.getenv("MAX_ARTICLES", 20)),  # デフォルト20件取得
+        "apiKey": os.getenv("NEWS_API_KEY")
+    }
 
-{text}
-
-翻訳と要約:
-"""
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3  # 創造性を抑える
-    )
-    return response.choices[0].message.content
-
-def send_to_slack(message):
-    """Slackに通知"""
-    payload = {"text": message}
-    requests.post(os.getenv("SLACK_WEBHOOK_URL"), json=payload)
-
-def main():
-    articles = fetch_english_news()
-    for article in articles:
-        # タイトルと本文を結合して処理
-        content = f"Title: {article['title']}\n\nContent: {article['description'] or 'No description available'}"
-        japanese_summary = translate_and_summarize(content)
+    try:
+        response = requests.get("https://newsapi.org/v2/everything", params=params)
+        response.raise_for_status()
+        articles = response.json().get("articles", [])
         
-        # 通知メッセージ作成
-        message = (
-            f"*【英語記事の日本語要約】*\n"
-            f"{japanese_summary}\n\n"
-            f"*元記事リンク*: {article['url']}\n"
-            f"*公開日時*: {article['publishedAt']}"
+        # relevancy_scoreで降順ソート
+        ranked_articles = sorted(
+            articles,
+            key=lambda x: x.get("relevancy_score", 0),
+            reverse=True
+        )[:int(os.getenv("SELECT_TOP_N", 5))]  # デフォルト上位5件
+        
+        return ranked_articles
+
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"NewsAPIエラー: {str(e)}")
+
+
+def translate_and_summarize(ai_config: dict, text: str, target_lang: str = "ja") -> str:
+    """翻訳&要約（モデル選択対応版）"""
+    prompt = f"""
+    以下のテキストを{target_lang}に翻訳し、専門家向けに簡潔に要約してください。
+    特に「研究手法」「新規性」「社会的意義」を明確に記載すること。
+
+    原文:
+    {text}
+    """
+    
+    if isinstance(ai_config["client"], genai.GenerativeModel):
+        model = ai_config["client"].GenerativeModel(ai_config["model"])
+        response = model.generate_content(prompt)
+        return response.text
+    else:
+        response = ai_config["client"].chat.completions.create(
+            model=ai_config["model"],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3
         )
-        send_to_slack(message)
+        return response.choices[0].message.content
+
+def send_notification(message: str):
+    """Slack/Discordに通知"""
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL")
+    if not webhook_url:
+        raise ValueError("通知先Webhookが設定されていません")
+    
+    payload = {
+        "text": message  # Slack
+    } if "slack" in webhook_url.lower() else {
+        "content": message  # Discord
+    }
+    requests.post(webhook_url, json=payload)
 
 if __name__ == "__main__":
-    main()
-    
+    try:
+        ai_config = init_ai_client()
+        # articles = fetch_news()
+        articles = fetch_ranked_news()
+        
+        if not articles:
+            send_notification("⚠️ 今日の該当記事が見つかりませんでした")
+            exit()
+
+        for article in articles:
+            content = f"{article['title']}\n\n{article['description'] or 'No description available'}"
+            summary = translate_and_summarize(
+                ai_config,
+                content,
+                os.getenv("TARGET_LANGUAGE", "ja")
+            )
+            send_notification(
+                f"*【翻訳要約】*\n{summary}\n\n"
+                f"*Original Title*: {article['title']}\n"
+                f"*URL*: {article['url']}"
+            )
+            
+    except Exception as e:
+        error_msg = f"⚠️ 致命的なエラー: {str(e)}"
+        print(error_msg)
+        send_notification(error_msg)
