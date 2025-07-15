@@ -3,10 +3,10 @@ import requests
 from openai import OpenAI
 import google.generativeai as genai
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 
 # 環境変数読み込み
-load_dotenv()
+# load_dotenv()
 
 def get_model_name(provider: str) -> str:
     """Secretで指定されたモデル名を取得（デフォルト値付き）"""
