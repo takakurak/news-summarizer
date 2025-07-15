@@ -88,7 +88,6 @@ def translate_and_summarize(ai_config: dict, text: str, target_lang: str = "ja")
     """翻訳&要約（モデル選択対応版）"""
     prompt = f"""
     以下のテキストを{target_lang}に翻訳し、専門家向けに簡潔に要約してください。
-    特に「研究手法」「新規性」「社会的意義」を明確に記載すること。
 
     原文:
     {text}
